@@ -1,0 +1,58 @@
+# Pi Event Integrity — llms.txt
+# A read-only coverage audit for Soroban events on Pi Network, with a
+# replayable sha256 digest. No network needed for the offline modes.
+
+> A walker that reports "N events found" is usually reporting a LOWER BOUND.
+> The RPC caps a response at 100 events and does not honour its cursor, so a
+> full page cannot be continued. This tool classifies every window, labels the
+> total EXACT or LOWER BOUND, lists the unverifiable regions, and carries a
+> tamper-evident content digest.
+
+## What it is
+- read-only, zero-dependency, Node (ESM)
+- pure engine: lib.mjs, windows.mjs, audit.mjs, render.mjs
+- CLI: audit-cli.mjs
+
+## Four window states
+- verified   queried, returned FEWER than the cap  -> provable, exact for the range
+- truncated  queried, returned EXACTLY the cap    -> lower bound, NOT provable
+- errored    RPC error                            -> nothing known
+- skipped    never queried (retention / dry-run)  -> nothing known
+
+## Central rule
+- A total is EXACT only when EVERY window is provable.
+- Otherwise it is a LOWER BOUND and the unverifiable regions are listed.
+
+## Digest
+- sha256 over a fully specified canonical byte string (docs/DIGEST-SPEC.md)
+- one line per window: {start}-{end}|{state}|{eventCountOrNull}|{getEvents}|{startLedger}|{endLedgerExclusive}|{limit}
+- UTF-8, lines joined by LF, no trailing newline
+- always read with a header: endpoint + node version + protocol version
+- verdicts: match | mismatch | not-comparable
+- a mismatch means THE RECORD CHANGED, not that any value is wrong
+
+## Usage
+- node audit-cli.mjs --from <l> --to <l> [--step 9000] [--json]
+- node audit-cli.mjs --from <l> --to <l> --dry-run [--json]
+- node audit-cli.mjs --verify <manifest.json>     (offline)
+- node audit-cli.mjs --boundaries | --help
+- exit 0 all provable | 1 any unprovable | 2 invalid/outside retention
+
+## Measured (2026-10-19, rpc.testnet.minepi.com, node 28.0.1, protocol 28)
+- events per response: at most 100; `limit` is ignored
+- `cursor` returned but not honoured: a full page cannot be continued
+- endLedger is EXCLUSIVE ([L,L] -> 0 events)
+- retention: 120960 ledgers (~7 days at 5 s/ledger)
+- a 120960-ledger walk in 14 windows: 100% ledger coverage, 14/14 truncated,
+  events_found >= 1400 (LOWER BOUND), exit 1
+- a single recent ledger: verified, EXACT, exit 0
+- Mainnet Soroban RPC: not reachable (HTTP 503)
+
+## Not claimed
+- that an event set is complete
+- that events_found is a total when any window is unprovable
+- that a digest proves the RPC is unchanged
+- that a digest is a signature (it is content-addressed, not identity-attested)
+- that the 100-event cap is a protocol constant (it is observed and re-measured)
+- anything about Mainnet
+- that Pi Network has adopted, reviewed, or endorsed this

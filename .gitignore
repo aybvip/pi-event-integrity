@@ -1,0 +1,5 @@
+node_modules/
+*.log
+manifest.json
+audit-*.json
+.DS_Store

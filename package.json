@@ -1,0 +1,25 @@
+{
+  "name": "pi-event-integrity",
+  "version": "1.0.0",
+  "description": "Read-only coverage audit for Soroban events on Pi Network, with a replayable sha256 digest. Never claims an event set is complete.",
+  "type": "module",
+  "license": "MIT",
+  "private": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node test/integrity.test.mjs",
+    "audit": "node audit-cli.mjs",
+    "boundaries": "node audit-cli.mjs --boundaries"
+  },
+  "keywords": [
+    "pi-network",
+    "soroban",
+    "events",
+    "integrity",
+    "coverage",
+    "sha256",
+    "read-only"
+  ]
+}
