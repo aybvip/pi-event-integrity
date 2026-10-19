@@ -33,6 +33,26 @@ All measured on **2026-10-19** against `https://rpc.testnet.minepi.com`
 | `endLedger` above latest | clamped silently |
 | Mainnet Soroban RPC | **not reachable** (HTTP 503) |
 
+### Measured event-shape facts (2026-10-19)
+
+Read from a live `getEvents` response to establish what identity evidence exists:
+
+| Fact | Value |
+|---|---|
+| Event `id` format | `{TOID}-{index}`, e.g. `0117041702811729920-0000000000` |
+| TOID ordering | **monotonic non-decreasing** across a page (100 of 100 in order) |
+| Distinct ids in a page | **100 of 100** |
+| Ledger span of a full page | **17 ledgers** for 100 events |
+| Ledgers with no events inside that span | **3** (legitimate) |
+| Overlapping windows (share 50 ledgers) | return **0 shared ids** — pages are disjoint |
+| Fields present on every event | `type`, `ledger`, `ledgerClosedAt`, `contractId`, `id`, `operationIndex`, `transactionIndex`, `txHash`, `inSuccessfulContractCall`, `topic`, `value` |
+| Fields the audit interprets | `id`, `ledger`, `ledgerClosedAt`, `txHash`, `transactionIndex`, `operationIndex` |
+| Fields the audit does **not** interpret | `topic`, `value`, `contractId`, `type`, `inSuccessfulContractCall` |
+| Result-level window fields | `oldestLedger`, `latestLedger`, `oldestLedgerCloseTime`, `latestLedgerCloseTime` |
+
+A verified 20-ledger window (27255803..27255822) returned **83 events** over 17
+ledgers, with **83 distinct ids**, ascending order, and **3 empty ledgers**.
+
 ## Repositories this one builds on
 
 | Repository | Role |

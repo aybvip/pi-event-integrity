@@ -126,3 +126,53 @@ always authenticated as this account. Where an earlier commit in this repository
 carried a different author email, the history was rewritten (all commits
 re-authored to the account address) and force-pushed, because the repository was
 new and had no downstream clones. See `VERIFICATION.md` §7.
+
+## D14 — The event-identity layer is reported separately from the digest
+
+**Decision.** Event identity evidence (`sampleIds`, `sampleLedgers`) is recorded
+on each window record but is **deliberately excluded** from the canonical string
+that the coverage digest is taken over.
+
+**Why.** The two answer different questions:
+
+- the digest answers *"is this coverage record unchanged?"* — a statement about
+  the record's bytes;
+- the identity layer answers *"which event ids were seen, in what order?"* — a
+  statement about observed events.
+
+Folding identity into the digest would make a coverage record's digest depend on
+how many ids happened to be sampled, which is not part of the coverage claim. The
+test suite asserts that adding identity evidence does **not** change the coverage
+digest, so the separation is enforced, not merely intended.
+
+**Consequence.** A reader verifies two things independently: the digest (over the
+coverage record) and the identity findings (over the sampled ids). Neither
+implies the other.
+
+## D15 — Duplicate absence is a lower bound, and empty ledgers are not gaps
+
+**Decision.** Two rules were adopted verbatim, and are enforced by tests:
+
+1. **A duplicate cannot be observed inside a truncated window.** Therefore the
+   duplicate finding is `unobservable` — never `none` — whenever any window was
+   truncated. `none` is reserved for a fully-verified record with no repeated id.
+2. **A ledger inside an unproven window is not reported as a gap.** Only a
+   `verified` window supports a statement about its ledgers. A ledger with no
+   events inside a verified window is reported as `empty` — legitimately, as
+   information, not as an error.
+
+**Why.** Both rules exist because the tempting shortcut is wrong in each case:
+
+- reporting `none` for an all-truncated walk would claim an absence that the data
+  cannot support — the page was cut, so a repeat inside it is unreachable;
+- reporting a ledger inside a truncated window as `empty` would assert its
+  contents with no basis — nothing about that ledger was ever returned.
+
+**Measured backing.** A verified 20-ledger window returned 83 events over 17
+ledgers (3 empty), with 83 of 83 distinct ids and ascending TOID order. An
+all-truncated retention walk returned 14/14 truncated windows, `duplicates:
+unobservable`, and 0 empty ledgers (because 0 windows were provable).
+
+**Forbidden prose.** "no duplicates exist", "proves no duplicates" and "no events
+are missing" were added to `FORBIDDEN_CLAIMS`. The test suite fails if the
+repository's own documentation asserts any of them.

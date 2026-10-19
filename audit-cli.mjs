@@ -26,7 +26,7 @@ import {
   RETENTION_LEDGERS,
   BOUNDARIES,
 } from "./lib.mjs";
-import { buildAudit, digestRecords, verifyDigest, verifyVerdict } from "./audit.mjs";
+import { buildAudit, digestRecords, verifyDigest, verifyVerdict, buildSourceComparison } from "./audit.mjs";
 import { renderAudit, renderBoundaries, toJSON } from "./render.mjs";
 import { splitWindows, clampRange } from "./windows.mjs";
 
@@ -76,9 +76,13 @@ async function liveAudit({ from, to, step, asJson }) {
         filters: [],
         limit: PAGE_CAP,
       });
-      const count = (ev.events ?? []).length;
+      const events = ev.events ?? [];
+      const count = events.length;
       records.push(makeWindowRecord({
         start, end, state: windowStateOf(count, PAGE_CAP), eventCount: count, request,
+        // identity evidence, read from the measured event shape:
+        sampleIds: events.map((e) => e.id).filter((x) => typeof x === "string"),
+        sampleLedgers: events.map((e) => Number(e.ledger)).filter((x) => Number.isFinite(x)),
       }));
     } catch (e) {
       records.push(makeWindowRecord({ start, end, state: "errored", eventCount: null, request, error: e.message }));
@@ -89,6 +93,7 @@ async function liveAudit({ from, to, step, asJson }) {
   const audit = buildAudit({
     records,
     requestedSpan: clipped.end - clipped.start + 1,
+    retention: { oldest, latest },
     header: {
       endpoint: RPC_URL,
       // identity read live, so the digest is version-scoped
@@ -155,6 +160,39 @@ function verifyManifest(path) {
   process.exitCode = verdict === "match" ? 0 : 1;
 }
 
+function compareManifests(pathA, pathB) {
+  if (!pathA || !pathB || pathA === pathB) {
+    console.error("ERROR: --compare needs two distinct manifest paths.");
+    process.exit(2);
+  }
+  const load = (p) => {
+    try {
+      return JSON.parse(readFileSync(p, "utf8"));
+    } catch (e) {
+      console.error(`ERROR: cannot read manifest "${p}": ${e.message}`);
+      process.exit(2);
+    }
+  };
+  const a = load(pathA);
+  const b = load(pathB);
+  const result = buildSourceComparison(a, b);
+  console.log("=== PI EVENT INTEGRITY — independent-source comparison (offline) ===");
+  console.log(`  source A:   ${a?.header?.endpoint ?? "(unknown)"} v${a?.header?.nodeVersion ?? "?"}`);
+  console.log(`  source B:   ${b?.header?.endpoint ?? "(unknown)"} v${b?.header?.nodeVersion ?? "?"}`);
+  console.log(`  verdict:    ${result.verdict}`);
+  console.log(`  reason:     ${result.reason ?? result.note ?? ""}`);
+  if (result.comparedRanges) {
+    console.log(`  compared:   ${result.comparedRanges} overlapping verified range(s)`);
+    for (const d of result.disagreements ?? []) {
+      console.log(`    DIFF [${d.from} .. ${d.to}]  A=${d.aCount}  B=${d.bCount}`);
+    }
+  }
+  console.log("");
+  console.log("  Only VERIFIED windows are compared. A truncated window has a lower");
+  console.log("  bound, not a count, so it cannot be compared at all.");
+  process.exitCode = result.verdict === "agree" ? 0 : result.verdict === "not-comparable" ? 2 : 1;
+}
+
 function usage() {
   console.log(
     [
@@ -162,7 +200,8 @@ function usage() {
       "",
       "  node audit-cli.mjs --from <l> --to <l> [--step 9000] [--json]",
       "  node audit-cli.mjs --from <l> --to <l> --dry-run [--json]",
-      "  node audit-cli.mjs --verify <manifest.json>   (offline)",
+      "  node audit-cli.mjs --verify <manifest.json>          (offline)",
+      "  node audit-cli.mjs --compare <a.json> <b.json>       (offline)",
       "  node audit-cli.mjs --boundaries",
       "  node audit-cli.mjs --help",
       "",
@@ -175,6 +214,7 @@ function usage() {
 if (args.length === 0 || has("--help") || has("-h")) usage();
 else if (has("--boundaries")) console.log(renderBoundaries());
 else if (has("--verify")) verifyManifest(after("--verify"));
+else if (has("--compare")) compareManifests(after("--compare"), args[args.indexOf("--compare") + 2] ?? args[args.indexOf("--compare") + 1]);
 else if (has("--dry-run")) {
   const from = Number(after("--from")), to = Number(after("--to"));
   const step = Math.max(1, Number(after("--step")) || DEFAULT_STEP);

@@ -9,7 +9,7 @@ The dates and outputs are what was actually observed, not expected values.
 node test/integrity.test.mjs
 ```
 
-Expected: `pass: 101  fail: 0`.
+Expected: `pass: 191  fail: 0`.
 
 ## 1. The two verdicts, same tool
 
@@ -195,11 +195,79 @@ curl -s "https://api.github.com/repos/aybvip/pi-event-integrity/stats/contributo
 
 Expected: one email (`86422631+aybvip@users.noreply.github.com`) and one login
 (`aybvip`). The file contents are unchanged by the rewrite; the test suite result
-is identical before and after (110 pass / 0 fail).
+is identical before and after (191 pass / 0 fail).
 
 > Note on caching: GitHub's `contributors` list is cached and can lag a
 > force-push by minutes to hours. `stats/contributors` reflects the new history
 > sooner. Read the **commits** endpoint (or the commit author email) for the
 > authoritative answer. A `contributors` entry that no longer matches any
 > commit's author email is a stale cache, not a live attribution.
+
+## 8. The identity layer, live
+
+### A verified window: duplicates and gaps are provable
+
+```bash
+node audit-cli.mjs --from 27255803 --to 27255822 --step 20
+```
+
+Observed on 2026-10-19:
+
+```
+  ledgers_covered:   20  (100%)
+  windows:           1  verified=1 truncated=0 errored=0 skipped=0
+  events_found:      83  (EXACT — every window is provable)
+
+# Event identity
+  ids examined:      83
+  id ordering ok:    yes
+  duplicates:        none  (repeated ids observed: 0)
+  empty ledgers:     3  (inside 1 verified window(s))
+  unproven windows:  0  (ledgers inside them are NOT reported as gaps)
+
+# Resume
+  next start ledger: 27255823
+  possible: yes — the resume point is still inside retention.
+```
+
+Exit code `0`. The three empty ledgers (27255807, 27255808, 27255810) are reported
+as information — not as missing events.
+
+### An all-truncated walk: duplicates become `unobservable`
+
+```bash
+node audit-cli.mjs --from 1 --to 999999999 --step 9000
+```
+
+Observed: 14 windows, all `truncated` → `duplicates: unobservable`, `unproven
+windows: 14`, and `empty ledgers: 0` (because no window is provable). Exit code
+`1`. The tool refuses to report `none`, because a duplicate inside a truncated
+window cannot be seen.
+
+### The identity layer does not change the coverage digest
+
+The test suite asserts that adding `sampleIds` to a window record leaves the
+coverage digest byte-identical. Identity and coverage are verified independently.
+
+## 9. Independent-source comparison
+
+```bash
+node audit-cli.mjs --from 27255600 --to 27255601 --step 5 --json > a.json
+node audit-cli.mjs --from 27255600 --to 27255601 --step 5 --json > b.json
+node audit-cli.mjs --compare a.json b.json
+```
+
+Observed:
+
+```
+  source A:   https://rpc.testnet.minepi.com v28.0.1
+  source B:   https://rpc.testnet.minepi.com v28.0.1
+  verdict:    agree
+  compared:   1 overlapping verified range(s)
+```
+
+Exit code `0`. Comparing an all-truncated record against anything yields
+`not-comparable` (exit `2`) — a truncated window has a lower bound, not a count.
+Comparing across different node or protocol versions also yields `not-comparable`,
+never a disagreement.
 

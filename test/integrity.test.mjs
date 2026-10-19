@@ -2,12 +2,15 @@
 // No network. No personal data. No writes.
 
 import {
-  CLAIM_KINDS, FORBIDDEN_CLAIMS, COMPLETENESS_NOT_CLAIMED, WINDOW_STATES, UNPROVABLE_STATES,
+  CLAIM_KINDS, FORBIDDEN_CLAIMS, COMPLETENESS_NOT_CLAIMED, DUPLICATE_ABSENCE_NOT_CLAIMED, WINDOW_STATES, UNPROVABLE_STATES,
   makeWindowRecord, windowStateOf, auditCoverage, DIGEST_SPEC, canonicalWindowLine,
   canonicalRecord, makeAuditHeader, HEADER_MEANING, BOUNDARIES, FIXTURES, FIXTURE_NOTE,
   RETENTION_LEDGERS, PAGE_CAP_RETAINED,
+  EVENT_ID_FORMAT, EVENT_FIELDS_READ, EVENT_FIELDS_NOT_INTERPRETED, parseEventId, idsAreOrdered,
+  DUPLICATE_STATES, detectDuplicates, GAP_KINDS, ledgerGapsInWindow, detectGaps,
+  resumePoint, resumeFeasibility, SOURCE_COMPARISON_VERDICTS, compareSources,
 } from "../lib.mjs";
-import { digestRecords, buildAudit, verifyDigest, verifyVerdict } from "../audit.mjs";
+import { digestRecords, buildAudit, verifyDigest, verifyVerdict, buildIdentityAnalysis, buildSourceComparison } from "../audit.mjs";
 import { renderAudit, renderBoundaries, toJSON, AUDIT_DISCLAIMER } from "../render.mjs";
 import { splitWindows, coveredLedgers, coveragePct, windowsAreSane, clampRange, isTruncated, PAGE_CAP } from "../windows.mjs";
 import { readFileSync, readdirSync } from "node:fs";
@@ -162,7 +165,7 @@ ok(/does not prove the RPC answers the same way/i.test(text), "the rendered audi
 const lowerText = renderAudit(buildAudit({ records: mixed, requestedSpan: 200, header: { endpoint: "x" } }));
 ok(/LOWER BOUND/.test(lowerText), "a truncated audit renders as LOWER BOUND");
 ok(/Unverifiable regions/.test(lowerText), "a truncated audit lists the unverifiable regions");
-eq(AUDIT_DISCLAIMER.length, 3, "three disclaimers are attached to every audit");
+eq(AUDIT_DISCLAIMER.length, 4, "four disclaimers are attached to every audit");
 
 const j = JSON.parse(toJSON(audit));
 eq(j.mode, "audit", "JSON marks the mode");
@@ -205,10 +208,165 @@ ok(/hex/.test(DIGEST_SPEC.encoding), "spec names hex");
 ok(/\{start\}-\{end\}/.test(DIGEST_SPEC.canonical), "spec gives the canonical line shape");
 ok(/joined by/.test(DIGEST_SPEC.canonical), "spec states the line joining");
 
+// --- event identity: parsing and ordering ------------------------------------
+eq(parseEventId("0117041702811729920-0000000000").index, 0, "parseEventId reads the index");
+eq(parseEventId("0117041702811729920-0000000000").toid.toString(), "117041702811729920", "parseEventId reads the TOID as a number (leading zeros are not significant)");
+eq(parseEventId("not-an-id"), null, "parseEventId rejects a non-matching shape");
+eq(parseEventId("0117-abcdef"), null, "parseEventId rejects a non-numeric index");
+eq(parseEventId(null), null, "parseEventId rejects a non-string");
+eq(EVENT_ID_FORMAT, "{TOID}-{index}", "the measured id format is recorded");
+ok(idsAreOrdered(["0117000000000000001-0000000000", "0117000000000000002-0000000000"]), "ascending TOIDs are ordered");
+ok(idsAreOrdered(["0117000000000000002-0000000000", "0117000000000000002-0000000000"]), "equal TOIDs are still ordered (non-decreasing)");
+ok(!idsAreOrdered(["0117000000000000002-0000000000", "0117000000000000001-0000000000"]), "descending TOIDs are NOT ordered");
+ok(!idsAreOrdered(["garbage"]), "an unparseable id makes ordering fail");
+ok(EVENT_FIELDS_NOT_INTERPRETED.includes("value") && EVENT_FIELDS_NOT_INTERPRETED.includes("topic"),
+  "event value/topic are explicitly not interpreted");
+ok(EVENT_FIELDS_READ.includes("id") && EVENT_FIELDS_READ.includes("ledger"), "the read fields are declared");
+
+// --- duplicate detection -----------------------------------------------------
+const dupClean = [makeWindowRecord({ start: 1, end: 10, state: "verified", eventCount: 2, request: {},
+  sampleIds: ["0117000000000000001-0000000000", "0117000000000000002-0000000000"] })];
+const dupResult = detectDuplicates(dupClean);
+eq(dupResult.state, "none", "distinct ids -> no duplicate observed");
+eq(dupResult.duplicateCount, 0, "no duplicate count");
+eq(dupResult.idsExamined, 2, "both ids examined");
+
+const dupExact = [makeWindowRecord({ start: 1, end: 10, state: "verified", eventCount: 3, request: {},
+  sampleIds: ["0117000000000000001-0000000000", "0117000000000000001-0000000000", "0117000000000000002-0000000000"] })];
+const dupExactResult = detectDuplicates(dupExact);
+eq(dupExactResult.state, "exact", "a repeated id is detected as exact");
+eq(dupExactResult.duplicateCount, 1, "one duplicate group");
+eq(dupExactResult.duplicates[0].count, 2, "the duplicate was seen twice");
+eq(dupExactResult.duplicates[0].id, "0117000000000000001-0000000000", "the duplicate id is named");
+
+const dupAcross = [
+  makeWindowRecord({ start: 1, end: 10, state: "verified", eventCount: 1, request: {}, sampleIds: ["0117000000000000005-0000000000"] }),
+  makeWindowRecord({ start: 11, end: 20, state: "verified", eventCount: 1, request: {}, sampleIds: ["0117000000000000005-0000000000"] }),
+];
+const dupAcrossResult = detectDuplicates(dupAcross);
+eq(dupAcrossResult.state, "exact", "a duplicate across two windows is detected");
+eq(dupAcrossResult.duplicates[0].count, 2, "the cross-window duplicate was seen twice");
+eq(dupAcrossResult.duplicates[0].places.length, 2, "both places are recorded");
+
+// truncated windows make duplicate ABSENCE unprovable
+const dupTruncated = [makeWindowRecord({ start: 1, end: 10, state: "truncated", eventCount: 100, request: {}, sampleIds: ["0117000000000000001-0000000000"] })];
+const dupTruncResult = detectDuplicates(dupTruncated);
+eq(dupTruncResult.state, "unobservable", "a truncated window makes duplicate absence unobservable");
+ok(/cannot be completed/.test(dupTruncResult.caveat), "the duplicate caveat names the truncation limit");
+ok(DUPLICATE_STATES.unobservable && DUPLICATE_STATES.exact && DUPLICATE_STATES.none, "all three duplicate states exist");
+ok(/does not claim that a duplicate does not exist/i.test(DUPLICATE_ABSENCE_NOT_CLAIMED), "the duplicate non-claim is stated verbatim");
+
+// --- gap detection -----------------------------------------------------------
+const gapRecord = makeWindowRecord({ start: 100, end: 104, state: "verified", eventCount: 2, request: {},
+  sampleIds: ["0117000000000000001-0000000000", "0117000000000000001-0000000001"], sampleLedgers: [100, 100] });
+const gapIn = ledgerGapsInWindow(gapRecord);
+eq(gapIn.kind, "empty", "an empty ledger inside a verified window is kind=empty");
+eq(gapIn.provable, true, "gap in a verified window is provable");
+eq(gapIn.emptyLedgers, [101, 102, 103, 104], "the empty ledgers are listed");
+eq(gapIn.emptyCount, 4, "the empty count is exact");
+const gapUnproven = ledgerGapsInWindow(makeWindowRecord({ start: 100, end: 104, state: "truncated", eventCount: 100, request: {}, sampleLedgers: [100] }));
+eq(gapUnproven.kind, "unproven", "a ledger in a truncated window is unproven, NOT a gap");
+eq(gapUnproven.provable, false, "unproven gaps are not provable");
+const gaps = detectGaps([gapRecord, makeWindowRecord({ start: 200, end: 209, state: "truncated", eventCount: 100, request: {} })]);
+eq(gaps.provableWindows, 1, "only verified windows support gap statements");
+eq(gaps.unprovenWindows, 1, "the truncated window is counted as unproven");
+eq(gaps.emptyLedgerCount, 4, "the empty ledgers come only from verified windows");
+ok(/not an error/.test(gaps.note), "the gap note says an empty ledger is not an error");
+
+// --- resume ------------------------------------------------------------------
+const resumeMid = resumePoint([
+  makeWindowRecord({ start: 100, end: 199, state: "verified", eventCount: 3, request: {} }),
+  makeWindowRecord({ start: 200, end: 299, state: "truncated", eventCount: 100, request: {} }),
+]);
+eq(resumeMid.resumable, true, "a covered range is resumable");
+eq(resumeMid.nextStartLedger, 300, "resume starts after the last covered ledger");
+eq(resumeMid.lastCoveredLedger, 299, "the last covered ledger is recorded");
+eq(resumePoint([]).resumable, false, "an empty record is not resumable");
+const feasOk = resumeFeasibility(resumeMid, 250, 500);
+eq(feasOk.possible, true, "a resume inside retention is possible");
+const feasLost = resumeFeasibility(resumeMid, 400, 500);
+eq(feasLost.possible, false, "a resume past retention is impossible");
+eq(feasLost.lostLedgers, 100, "the permanently lost ledger count is exact");
+eq(feasLost.lostFrom, 300, "the lost range starts at the resume point");
+eq(feasLost.lostTo, 399, "the lost range ends before the new oldest");
+
+// --- source comparison -------------------------------------------------------
+const sourceA = { header: { endpoint: "A", nodeVersion: "28.0.1" }, records: [
+  makeWindowRecord({ start: 1, end: 100, state: "verified", eventCount: 3, request: {} }) ] };
+const sourceB = { header: { endpoint: "B", nodeVersion: "28.0.1" }, records: [
+  makeWindowRecord({ start: 1, end: 100, state: "verified", eventCount: 3, request: {} }) ] };
+eq(compareSources(sourceA, sourceB).verdict, "agree", "identical verified counts agree");
+const sourceC = { header: { endpoint: "B", nodeVersion: "28.0.1" }, records: [
+  makeWindowRecord({ start: 1, end: 100, state: "verified", eventCount: 4, request: {} }) ] };
+eq(compareSources(sourceA, sourceC).verdict, "disagree", "different verified counts disagree");
+eq(compareSources(sourceA, sourceC).disagreements.length, 1, "the disagreeing range is listed");
+const sourceTrunc = { header: { endpoint: "B", nodeVersion: "28.0.1" }, records: [
+  makeWindowRecord({ start: 1, end: 100, state: "truncated", eventCount: 100, request: {} }) ] };
+eq(compareSources(sourceA, sourceTrunc).verdict, "not-comparable", "a truncated source cannot be compared");
+const sourceOther = { header: { endpoint: "B", nodeVersion: "28.0.1" }, records: [
+  makeWindowRecord({ start: 500, end: 600, state: "verified", eventCount: 3, request: {} }) ] };
+eq(compareSources(sourceA, sourceOther).verdict, "not-comparable", "non-overlapping ranges are not comparable");
+const sourceDiffVer = { header: { endpoint: "B", nodeVersion: "29.0.0" }, records: [
+  makeWindowRecord({ start: 1, end: 100, state: "verified", eventCount: 3, request: {} }) ] };
+eq(compareSources(sourceA, sourceDiffVer).verdict, "not-comparable", "a node-version change is not comparable");
+eq(compareSources(null, sourceB).verdict, "not-comparable", "a missing source is not comparable");
+eq(compareSources(sourceA, sourceC).comparedRanges, 1, "one overlapping verified range is compared");
+ok(SOURCE_COMPARISON_VERDICTS.agree && SOURCE_COMPARISON_VERDICTS.disagree && SOURCE_COMPARISON_VERDICTS["not-comparable"],
+  "all three comparison verdicts exist");
+
+// --- buildIdentityAnalysis + buildAudit wiring ------------------------------
+const idWith = buildIdentityAnalysis(dupClean);
+eq(idWith.idsAnalysed, true, "identity analysis runs when ids exist");
+eq(idWith.windowsWithIds, 1, "the window with ids is counted");
+eq(idWith.idsExamined, 2, "both ids are examined");
+eq(idWith.ordering, true, "ordering is reported true for ascending ids");
+const idWithout = buildIdentityAnalysis([makeWindowRecord({ start: 1, end: 10, state: "verified", eventCount: 2, request: {} })]);
+eq(idWithout.idsAnalysed, false, "identity analysis reports when no ids exist");
+ok(/no statement about duplicates or gaps is possible/.test(idWithout.scope), "the no-ids scope is stated");
+const idMalformed = buildIdentityAnalysis([makeWindowRecord({ start: 1, end: 10, state: "verified", eventCount: 1, request: {}, sampleIds: ["bad-id"] })]);
+eq(idMalformed.malformedIds.length, 1, "a malformed id is reported, not silently parsed");
+
+const auditExt = buildAudit({
+  records: dupClean, requestedSpan: 10,
+  header: { endpoint: "https://rpc.testnet.minepi.com", nodeVersion: "28.0.1", protocolVersion: 28, measuredAt: "2026-10-19" },
+  retention: { oldest: 1, latest: 1000 },
+});
+ok(auditExt.identity, "buildAudit carries the identity layer");
+eq(auditExt.identity.duplicates.state, "none", "buildAudit reports no duplicate for clean ids");
+eq(auditExt.resume.nextStartLedger, 11, "buildAudit carries the resume point");
+eq(auditExt.resume.possible, true, "buildAudit evaluates resume feasibility with retention");
+ok(auditExt.digest.sha256 === digestRecords(dupClean).sha256, "adding identity fields does not change the coverage digest");
+
+// --- the digest must NOT depend on identity evidence ------------------------
+const recNoIds = makeWindowRecord({ start: 1, end: 10, state: "verified", eventCount: 2, request: {} });
+const recWithIds = makeWindowRecord({ start: 1, end: 10, state: "verified", eventCount: 2, request: {}, sampleIds: ["0117000000000000001-0000000000"] });
+eq(digestRecords([recNoIds]).sha256, digestRecords([recWithIds]).sha256,
+  "the coverage digest is independent of identity evidence (digest scope is stated)");
+
+// --- rendering the extension ------------------------------------------------
+const extText = renderAudit(auditExt);
+ok(/Event identity/.test(extText), "the rendered audit shows the identity layer");
+ok(/Resume/.test(extText), "the rendered audit shows the resume layer");
+ok(/duplicates:/.test(extText), "the rendered audit shows the duplicate state");
+ok(/empty ledgers/.test(extText), "the rendered audit shows the gap count");
+const extNoIdText = renderAudit(buildAudit({ records: [recNoIds], requestedSpan: 10, header: { endpoint: "x" } }));
+ok(/no event ids were recorded/.test(extNoIdText), "an audit without ids says so instead of implying no duplicates");
+ok(/does not claim that a duplicate does not exist/i.test(extNoIdText), "the rendered audit carries the duplicate non-claim");
+const extJSON = JSON.parse(toJSON(auditExt));
+eq(extJSON.identity.duplicates.state, "none", "JSON carries the identity layer");
+eq(extJSON.resume.nextStartLedger, 11, "JSON carries the resume layer");
+
+// --- boundaries for the extension -------------------------------------------
+ok(BOUNDARIES.some((b) => /does not claim a duplicate does not exist/i.test(b)), "boundary: duplicate absence is not claimed");
+ok(BOUNDARIES.some((b) => /unproven/i.test(b)), "boundary: unproven ledgers are not called gaps");
+ok(FORBIDDEN_CLAIMS.some((f) => /no duplicates exist/i.test(f)), "forbids claiming no duplicates exist");
+ok(FORBIDDEN_CLAIMS.some((f) => /no events are missing/i.test(f)), "forbids claiming no events are missing");
+
 // --- docs and links ----------------------------------------------------------
 const docs = [
   "README.md", "llms.txt", "docs/INDEX.md", "docs/AUDIT-MODEL.md", "docs/DIGEST-SPEC.md",
-  "docs/UNVERIFIABLE.md", "docs/DECISIONS.md", "docs/SOURCES.md", "docs/VERIFICATION.md",
+  "docs/UNVERIFIABLE.md", "docs/EVENT-IDENTITY.md", "docs/GAPS-DUPLICATES-RESUME.md",
+  "docs/DECISIONS.md", "docs/SOURCES.md", "docs/VERIFICATION.md",
 ];
 for (const d of docs) {
   try { readFileSync(join(root, d), "utf8"); pass++; } catch { fail++; failures.push(`missing doc: ${d}`); }
