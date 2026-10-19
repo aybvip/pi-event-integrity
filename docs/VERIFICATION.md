@@ -172,3 +172,34 @@ fewer than the cap is `verified`/`EXACT`; a wide walk on an active range is
 `truncated`/`LOWER BOUND`. If a later run shows a wide walk as fully `verified`,
 that means the RPC has changed and this repository's recorded semantics are
 stale — which is itself a reportable measurement.
+
+## 7. Commit attribution (D13)
+
+GitHub attributes a commit to the account that **owns the author email**, not to
+whoever authenticated the push. An early commit here was pushed from the project
+account but carried an author email owned by a different GitHub account, so the
+contributors list credited that other account. The history was rewritten so every
+commit is authored by the project account address, then force-pushed.
+
+Check it against the published repository — the author of every commit should be
+the project account, and the contributors list should name only that account:
+
+```bash
+# every commit author email
+git log --format="%ae" | sort -u
+
+# GitHub's own attribution (no cache)
+curl -s "https://api.github.com/repos/aybvip/pi-event-integrity/stats/contributors" \
+  | grep -o '"login":"[^"]*"' | sort -u
+```
+
+Expected: one email (`86422631+aybvip@users.noreply.github.com`) and one login
+(`aybvip`). The file contents are unchanged by the rewrite; the test suite result
+is identical before and after (110 pass / 0 fail).
+
+> Note on caching: GitHub's `contributors` list is cached and can lag a
+> force-push by minutes to hours. `stats/contributors` reflects the new history
+> sooner. Read the **commits** endpoint (or the commit author email) for the
+> authoritative answer. A `contributors` entry that no longer matches any
+> commit's author email is a stale cache, not a live attribution.
+

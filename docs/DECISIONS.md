@@ -107,3 +107,22 @@ bodies and does not reason about what the events mean.
 
 **Why.** Interpretation belongs to the caller and would import assumptions this
 project cannot measure.
+
+## D13 — Commits are authored with the account's own address
+
+**Decision.** Commits in this repository are authored and committed with the
+account's own GitHub address
+(`86422631+aybvip@users.noreply.github.com`), and the email is fixed in the
+local repository config.
+
+**Why.** GitHub attributes a commit to whichever account *owns the author email*,
+not to whoever authenticated the push. A commit pushed from account A whose
+author email belongs to account B is shown as authored by B in the contributors
+list — an attribution error, even though A performed the push. Using the
+account's own address keeps authorship unambiguous.
+
+**Note.** This is an attribution property, not a security property: the push was
+always authenticated as this account. Where an earlier commit in this repository
+carried a different author email, the history was rewritten (all commits
+re-authored to the account address) and force-pushed, because the repository was
+new and had no downstream clones. See `VERIFICATION.md` §7.
